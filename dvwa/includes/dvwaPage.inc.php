@@ -26,50 +26,98 @@ if( !isset( $_COOKIE[ 'security' ] ) || !in_array( $_COOKIE[ 'security' ], $secu
 	} else {
 		dvwaSecurityLevelSet( 'impossible' );
 	}
+	// If the cookie wasn't set then the session flags need updating.
+	dvwa_start_session();
 }
 
-// This will setup the session cookie based on
-// the security level.
+/*
+ * This function is called after login and when you change the security level.
+ * It gets the security level and sets the httponly and samesite cookie flags
+ * appropriately.
+ *
+ * To force an update of the cookie flags we need to update the session id,
+ * just setting the flags and doing a session_start() does not change anything.
+ * For this, session_id() or session_regenerate_id() can be used.
+ * Both keep the existing session values, so nothing is lost,
+ * it will just cause a new Set-Cookie header to be sent with the new right
+ * flags and the new id (or the same one if we wish to keep it).
+*/
+function dvwa_start_session() {
+	// This will setup the session cookie based on
+	// the security level.
 
-if (dvwaSecurityLevelGet() == 'impossible') {
-	$httponly = true;
-	$samesite = true;
+	$security_level = dvwaSecurityLevelGet();
+	if ($security_level == 'impossible') {
+		$httponly = true;
+		$samesite = "Strict";
+	}
+	else {
+		$httponly = false;
+		$samesite = "";
+	}
+
+	$maxlifetime = 86400;
+	$secure = false;
+	$domain = parse_url($_SERVER['HTTP_HOST'], PHP_URL_HOST);
+
+	/*
+	 * Need to do this as you can't update the settings of a session
+	 * while it is open. So check if one is open, close it if needed
+	 * then update the values and start it again.
+	*/
+	if (session_status() == PHP_SESSION_ACTIVE) {
+		session_write_close();
+	}
+
+	session_set_cookie_params([
+		'lifetime' => $maxlifetime,
+		'path' => '/',
+		'domain' => $domain,
+		'secure' => $secure,
+		'httponly' => $httponly,
+		'samesite' => $samesite
+	]);
+
+	/*
+	 * We need to force a new Set-Cookie header with the updated flags by updating
+	 * the session id, either regenerating it or setting it to a value, because
+	 * session_start() might not generate a Set-Cookie header if a cookie already
+	 * exists.
+	 *
+	 * For impossible security level, we regenerate the session id, PHP will
+	 * generate a new random id. This is good security practice because it
+	 * prevents the reuse of a previous unauthenticated id that an attacker
+	 * might have knowledge of (aka session fixation attack).
+   *
+	 * For lower levels, we want to allow session fixation attacks, so if an id
+	 * already exists, we don't want it to change after authentication. We thus
+	 * set the id to its previous value using session_id(), which will force
+	 * the Set-Cookie header.
+	*/
+	if ($security_level == 'impossible') {
+		session_start();
+		session_regenerate_id(); // force a new id to be generated
+	}
+	else {
+		if (isset($_COOKIE[session_name()])) // if a session id already exists
+			session_id($_COOKIE[session_name()]); // we keep the same id
+		session_start(); // otherwise a new one will be generated here
+	}
 }
-else {
-	$httponly = false;
-	$samesite = false;
+
+if (array_key_exists ("Login", $_POST) && $_POST['Login'] == "Login") {
+	dvwa_start_session();
+} else {
+	if (!session_id()) {
+		session_start();
+	}
 }
-
-$maxlifetime = 86400;
-$secure = false;
-$domain = parse_url($_SERVER['HTTP_HOST'], PHP_URL_HOST);
-
-session_set_cookie_params([
-	'lifetime' => $maxlifetime,
-	'path' => '/',
-	'domain' => $domain,
-	'secure' => $secure,
-	'httponly' => $httponly,
-	'samesite' => $samesite
-]);
-session_start();
 
 if (!array_key_exists ("default_locale", $_DVWA)) {
 	$_DVWA[ 'default_locale' ] = "en";
 }
 
 dvwaLocaleSet( $_DVWA[ 'default_locale' ] );
-
-// DVWA version
-function dvwaVersionGet() {
-	return '1.10 *Development*';
-}
-
-// DVWA release date
-function dvwaReleaseDateGet() {
-	return '2015-10-08';
-}
-
 
 // Start session functions --
 
@@ -141,6 +189,14 @@ function &dvwaPageNewGrab() {
 }
 
 
+function dvwaThemeGet() {
+	if (isset($_COOKIE['theme'])) {
+		return $_COOKIE[ 'theme' ];
+	}
+	return 'light';
+}
+
+
 function dvwaSecurityLevelGet() {
 	global $_DVWA;
 
@@ -169,9 +225,10 @@ function dvwaSecurityLevelSet( $pSecurityLevel ) {
 	}
 
 	setcookie( 'security', $pSecurityLevel, 0, "/", "", false, $httponly );
+	$_COOKIE['security'] = $pSecurityLevel;
 }
 
-function dvwaLocaleGet() {	
+function dvwaLocaleGet() {
 	$dvwaSession =& dvwaSessionGrab();
 	return $dvwaSession[ 'locale' ];
 }
@@ -256,6 +313,8 @@ function dvwaHtmlEcho( $pPage ) {
 			$menuBlocks[ 'vulnerabilities' ][] = array( 'id' => 'authbypass', 'name' => 'Authorisation Bypass', 'url' => 'vulnerabilities/authbypass/' );
 		}
 		$menuBlocks[ 'vulnerabilities' ][] = array( 'id' => 'open_redirect', 'name' => 'Open HTTP Redirect', 'url' => 'vulnerabilities/open_redirect/' );
+		$menuBlocks[ 'vulnerabilities' ][] = array( 'id' => 'encryption', 'name' => 'Cryptography', 'url' => 'vulnerabilities/cryptography/' );
+		$menuBlocks[ 'vulnerabilities' ][] = array( 'id' => 'api', 'name' => 'API', 'url' => 'vulnerabilities/api/' );
 	}
 
 	$menuBlocks[ 'meta' ] = array();
@@ -304,7 +363,7 @@ function dvwaHtmlEcho( $pPage ) {
 	$securityLevelHtml = "<em>Security Level:</em> {$securityLevelHtml}";
 	$localeHtml = '<em>Locale:</em> ' . ( dvwaLocaleGet() );
 	$sqliDbHtml = '<em>SQLi DB:</em> ' . ( dvwaSQLiDBGet() );
-	
+
 
 	$messagesHtml = messagesPopAllToHtml();
 	if( $messagesHtml ) {
@@ -312,7 +371,7 @@ function dvwaHtmlEcho( $pPage ) {
 	}
 
 	$systemInfoHtml = "";
-	if( dvwaIsLoggedIn() ) 
+	if( dvwaIsLoggedIn() )
 		$systemInfoHtml = "<div align=\"left\">{$userInfoHtml}<br />{$securityLevelHtml}<br />{$localeHtml}<br />{$sqliDbHtml}</div>";
 	if( $pPage[ 'source_button' ] ) {
 		$systemInfoHtml = dvwaButtonSourceHtmlGet( $pPage[ 'source_button' ] ) . " $systemInfoHtml";
@@ -343,13 +402,15 @@ function dvwaHtmlEcho( $pPage ) {
 
 	</head>
 
-	<body class=\"home\">
+	<body class=\"home " . dvwaThemeGet() . "\">
 		<div id=\"container\">
 
 			<div id=\"header\">
 
 				<img src=\"" . DVWA_WEB_PAGE_TO_ROOT . "dvwa/images/logo.png\" alt=\"Damn Vulnerable Web Application\" />
-
+                <a href=\"#\" onclick=\"javascript:toggleTheme();\" class=\"theme-icon\" title=\"Toggle theme between light and dark.\">
+                    <img src=\"" . DVWA_WEB_PAGE_TO_ROOT . "dvwa/images/theme-light-dark.png\" alt=\"Damn Vulnerable Web Application\" />
+                </a>
 			</div>
 
 			<div id=\"main_menu\">
@@ -412,7 +473,7 @@ function dvwaHelpHtmlEcho( $pPage ) {
 
 	</head>
 
-	<body>
+	<body class=\"" . dvwaThemeGet() . "\">
 
 	<div id=\"container\">
 
@@ -448,7 +509,7 @@ function dvwaSourceHtmlEcho( $pPage ) {
 
 	</head>
 
-	<body>
+	<body class=\"" . dvwaThemeGet() . "\">
 
 		<div id=\"container\">
 
@@ -463,7 +524,7 @@ function dvwaSourceHtmlEcho( $pPage ) {
 
 // To be used on all external links --
 function dvwaExternalLinkUrlGet( $pLink,$text=null ) {
-	if(is_null( $text )) {
+	if(is_null( $text ) || $text == "") {
 		return '<a href="' . $pLink . '" target="_blank">' . $pLink . '</a>';
 	}
 	else {
